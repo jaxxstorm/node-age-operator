@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: node-age-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      name: node-age-operator
+  template:
+    metadata:
+      labels:
+        name: node-age-operator
+    spec:
+      serviceAccountName: node-age-operator
+      containers:
+        - name: node-age-operator
+          # Replace this with the built image name
+          image: REPLACE_IMAGE
+          command:
+          - node-age-operator
+          imagePullPolicy: Always
+          env:
+            - name: WATCH_NAMESPACE
+              value: ""
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: OPERATOR_NAME
+              value: "node-age-operator"
