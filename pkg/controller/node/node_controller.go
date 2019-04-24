@@ -2,7 +2,10 @@ package node
 
 import (
 
-  // "context"
+  "context"
+  "strconv"
+
+  // "github.com/acidlemon/go-dumper"
 
   "time"
   "os"
@@ -51,6 +54,7 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
 	}
 
   desiredAge, err := time.ParseDuration(os.Getenv("NODE_AGE"))
+  log.WithValues("Node.DesiredAge", os.Getenv("NODE_AGE")).V(1).Info("Node Age defined")
 
   if err != nil {
     log.Error(err, "Must set NODE_AGE environment variable")
@@ -58,13 +62,20 @@ func add(mgr manager.Manager, r reconcile.Reconciler) error {
   }
 
   pred := predicate.Funcs{
+    CreateFunc: func(e event.CreateEvent) bool {
+      return false // We're not going to want to reconcile new nodes
+    },
     UpdateFunc: func(e event.UpdateEvent) bool {
 
       // Get current node age
       creationTime := e.MetaNew.GetCreationTimestamp()
       age := time.Since(creationTime.Time)
+      log.WithValues("Node.Name", e.MetaNew.GetName(), "Node.DesiredAge", desiredAge.String(), "Node.CurrentAge", age.String()).V(1).Info("Determining if Node should be reconciled")
 
-      return desiredAge < age
+      if desiredAge > age {
+        return false 
+      }
+      return true
     },
     DeleteFunc: func(e event.DeleteEvent) bool {
       // Evaluates to false if the object has been confirmed deleted.
@@ -99,8 +110,71 @@ func (r *ReconcileNode) Reconcile(request reconcile.Request) (reconcile.Result, 
 	reqLogger := log.WithValues("Node.Name", request.Name)
 	reqLogger.Info("Reconciling Node")
 
+  // define an error var so we don't have to keep redeclaring it
+  var err error
 
-	// Pod already exists - don't requeue
-	reqLogger.Info("Skip reconcile")
+  // Get all the nodes
+  nodes := &corev1.NodeList{}
+  opts := &client.ListOptions{}
+  err = r.client.List(context.TODO(), opts, nodes)
+  if err != nil {
+    reqLogger.Info("Failed to list nodes")
+    return reconcile.Result{}, err
+  }
+
+
+  // Because the field selector doesn't currently seem to work for some reason
+  // Loop through all the nodes and detect if there's an unscheduable flag
+  // FIXME: also check the taints on the nodes
+  c := 0
+  for _, node := range nodes.Items {
+    if node.Spec.Unschedulable == true {
+      c++
+    }
+  }
+
+  // Get the length of the nodes slice
+  n := len(nodes.Items)
+
+  // calculate the % of nodes currently cordoned and set the threshold
+  percent := c / n  * 100
+  possiblePercent := c+1 / n * 100
+  var threshold int = 50
+
+  cordonLogger := reqLogger.WithValues("CordonedPercent", strconv.Itoa(percent), "Threshold", strconv.Itoa(threshold), "CordonedNodes", strconv.Itoa(c), "TotalNodes", strconv.Itoa(n))
+  // if the % is gt than threshold, bail
+  if percent > threshold {
+    cordonLogger.Info("Refusing to cordon node because threshold met")
+    return reconcile.Result{}, err
+  } else if possiblePercent > threshold {
+    cordonLogger.Info("Refusing to cordon node because threshold would be met once cordoned")
+    return reconcile.Result{}, err
+  }
+
+  // Get the node from the request
+  node := &corev1.Node{}
+  err = r.client.Get(context.TODO(), request.NamespacedName, node)
+
+  if err != nil {
+    reqLogger.Info("Could not find node")
+    return reconcile.Result{}, err
+  }
+
+  if node.Spec.Unschedulable {
+    reqLogger.Info("Node already cordoned")
+    return reconcile.Result{}, err
+  }
+
+  node.Spec.Unschedulable = true
+  err = r.client.Update(context.TODO(), node)
+
+  if err != nil {
+    reqLogger.Info("Could not update node")
+    return reconcile.Result{}, err
+  }
+
+
+	reqLogger.Info("Node cordoned")
 	return reconcile.Result{}, nil
 }
+
